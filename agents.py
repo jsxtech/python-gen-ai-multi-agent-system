@@ -1,58 +1,134 @@
+import logging
 import os
-from openai import OpenAI
+import uuid
+from typing import Optional
+
 import chromadb
 from chromadb.utils import embedding_functions
+from dotenv import load_dotenv
+from openai import OpenAI
+
+load_dotenv()
+
+logger = logging.getLogger(__name__)
+
 
 class ChatAgent:
-    def __init__(self):
-        self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    
-    def respond(self, message, context=""):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: str = "gpt-4",
+        system_prompt: str = "You are a helpful assistant.",
+    ) -> None:
+        resolved_key = api_key or os.getenv("OPENAI_API_KEY")
+        if not resolved_key:
+            raise ValueError("OPENAI_API_KEY must be set or passed explicitly")
+        self.client = OpenAI(api_key=resolved_key)
+        self.model = model
+        self.system_prompt = system_prompt
+        self.history: list[dict[str, str]] = []
+
+    def respond(self, message: str, context: str = "") -> str:
+        if not message or not message.strip():
+            raise ValueError("message must be a non-empty string")
+
+        system_content = self.system_prompt
+        if context:
+            system_content += f"\n\n{context}"
+
+        messages = [{"role": "system", "content": system_content}] + self.history
+        messages.append({"role": "user", "content": message})
+
         try:
             response = self.client.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "system", "content": f"You are a helpful assistant. {context}"},
-                    {"role": "user", "content": message}
-                ]
+                model=self.model,
+                messages=messages,
             )
-            return response.choices[0].message.content
+            assistant_message = response.choices[0].message.content
+            self.history.append({"role": "user", "content": message})
+            self.history.append({"role": "assistant", "content": assistant_message})
+            return assistant_message
         except Exception as e:
-            return f"Error: {str(e)}"
+            logger.exception("OpenAI API call failed")
+            raise RuntimeError(f"Chat completion failed: {e}") from e
+
+    def clear_history(self) -> None:
+        self.history.clear()
+
 
 class RAGAgent:
-    def __init__(self, collection_name="docs", persist_dir="./chroma_db"):
+    def __init__(
+        self,
+        collection_name: str = "docs",
+        persist_dir: str = "./chroma_db",
+        api_key: Optional[str] = None,
+    ) -> None:
+        resolved_key = api_key or os.getenv("OPENAI_API_KEY")
+        if not resolved_key:
+            raise ValueError("OPENAI_API_KEY must be set or passed explicitly")
         self.chroma = chromadb.PersistentClient(path=persist_dir)
-        self.ef = embedding_functions.OpenAIEmbeddingFunction(api_key=os.getenv("OPENAI_API_KEY"))
-        self.collection = self.chroma.get_or_create_collection(collection_name, embedding_function=self.ef)
-        self.doc_count = self.collection.count()
-    
-    def add_documents(self, texts, ids=None):
+        self.ef = embedding_functions.OpenAIEmbeddingFunction(api_key=resolved_key)
+        self.collection = self.chroma.get_or_create_collection(
+            collection_name, embedding_function=self.ef
+        )
+
+    def add_documents(self, texts: list[str], ids: Optional[list[str]] = None) -> None:
+        if not texts:
+            raise ValueError("texts must be a non-empty list")
+        if not all(isinstance(t, str) and t.strip() for t in texts):
+            raise ValueError("All items in texts must be non-empty strings")
+        if ids and len(ids) != len(texts):
+            raise ValueError("ids length must match texts length")
+
         try:
             if not ids:
-                ids = [f"doc_{self.doc_count + i}" for i in range(len(texts))]
+                ids = [str(uuid.uuid4()) for _ in texts]
             self.collection.upsert(documents=texts, ids=ids)
-            self.doc_count = self.collection.count()
+            logger.info("Added %d documents to collection", len(texts))
         except Exception as e:
-            print(f"Error adding documents: {e}")
-    
-    def search(self, query, n=3):
+            logger.exception("Failed to add documents")
+            raise RuntimeError(f"Failed to add documents: {e}") from e
+
+    def search(self, query: str, n: int = 3) -> list[str]:
+        if not query or not query.strip():
+            raise ValueError("query must be a non-empty string")
+        if n < 1:
+            raise ValueError("n must be at least 1")
+
+        count = self.collection.count()
+        if count == 0:
+            return []
+
+        # Cap n_results to collection size to avoid ChromaDB error
+        n = min(n, count)
+
         try:
             results = self.collection.query(query_texts=[query], n_results=n)
             return results["documents"][0] if results["documents"] else []
         except Exception as e:
-            print(f"Error searching: {e}")
-            return []
+            logger.exception("Search failed for query: %s", query)
+            raise RuntimeError(f"Search failed: {e}") from e
+
 
 class MultiAgentSystem:
-    def __init__(self):
-        self.chat_agent = ChatAgent()
-        self.rag_agent = RAGAgent()
-    
-    def process(self, query, use_rag=True):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: str = "gpt-4",
+        collection_name: str = "docs",
+        persist_dir: str = "./chroma_db",
+    ) -> None:
+        self.chat_agent = ChatAgent(api_key=api_key, model=model)
+        self.rag_agent = RAGAgent(
+            collection_name=collection_name,
+            persist_dir=persist_dir,
+            api_key=api_key,
+        )
+
+    def process(self, query: str, use_rag: bool = True) -> str:
         context = ""
         if use_rag:
             docs = self.rag_agent.search(query)
             context = f"Relevant context: {' '.join(docs)}" if docs else ""
-        
+
         return self.chat_agent.respond(query, context)
