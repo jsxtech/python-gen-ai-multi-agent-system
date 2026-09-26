@@ -13,19 +13,28 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+def _resolve_api_key(api_key: Optional[str]) -> str:
+    """Resolve the OpenAI API key from the argument or environment."""
+    resolved_key = api_key or os.getenv("OPENAI_API_KEY")
+    if not resolved_key:
+        raise ValueError("OPENAI_API_KEY must be set or passed explicitly")
+    return resolved_key
+
+
 class ChatAgent:
     def __init__(
         self,
         api_key: Optional[str] = None,
         model: str = "gpt-4",
         system_prompt: str = "You are a helpful assistant.",
+        max_history: int = 20,
     ) -> None:
-        resolved_key = api_key or os.getenv("OPENAI_API_KEY")
-        if not resolved_key:
-            raise ValueError("OPENAI_API_KEY must be set or passed explicitly")
-        self.client = OpenAI(api_key=resolved_key)
+        if max_history < 0:
+            raise ValueError("max_history must be non-negative")
+        self.client = OpenAI(api_key=_resolve_api_key(api_key))
         self.model = model
         self.system_prompt = system_prompt
+        self.max_history = max_history
         self.history: list[dict[str, str]] = []
 
     def respond(self, message: str, context: str = "") -> str:
@@ -44,13 +53,27 @@ class ChatAgent:
                 model=self.model,
                 messages=messages,
             )
-            assistant_message = response.choices[0].message.content
-            self.history.append({"role": "user", "content": message})
-            self.history.append({"role": "assistant", "content": assistant_message})
-            return assistant_message
         except Exception as e:
             logger.exception("OpenAI API call failed")
             raise RuntimeError(f"Chat completion failed: {e}") from e
+
+        assistant_message = response.choices[0].message.content
+        if assistant_message is None:
+            raise RuntimeError("Chat completion returned no content")
+
+        self.history.append({"role": "user", "content": message})
+        self.history.append({"role": "assistant", "content": assistant_message})
+        self._trim_history()
+        return assistant_message
+
+    def _trim_history(self) -> None:
+        """Keep at most `max_history` messages, preserving whole user/assistant turns."""
+        if self.max_history and len(self.history) > self.max_history:
+            # max_history counts individual messages; trim oldest, keep even count
+            excess = len(self.history) - self.max_history
+            # Round up to an even number so we drop complete turns
+            excess += excess % 2
+            self.history = self.history[excess:]
 
     def clear_history(self) -> None:
         self.history.clear()
