@@ -85,12 +85,14 @@ class RAGAgent:
         collection_name: str = "docs",
         persist_dir: str = "./chroma_db",
         api_key: Optional[str] = None,
+        embedding_model: str = "text-embedding-3-small",
     ) -> None:
-        resolved_key = api_key or os.getenv("OPENAI_API_KEY")
-        if not resolved_key:
-            raise ValueError("OPENAI_API_KEY must be set or passed explicitly")
+        resolved_key = _resolve_api_key(api_key)
         self.chroma = chromadb.PersistentClient(path=persist_dir)
-        self.ef = embedding_functions.OpenAIEmbeddingFunction(api_key=resolved_key)
+        self.ef = embedding_functions.OpenAIEmbeddingFunction(
+            api_key=resolved_key,
+            model_name=embedding_model,
+        )
         self.collection = self.chroma.get_or_create_collection(
             collection_name, embedding_function=self.ef
         )
