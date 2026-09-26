@@ -75,4 +75,18 @@ All methods raise exceptions on failure:
 | `collection_name` | `docs` | ChromaDB collection name |
 | `persist_dir` | `./chroma_db` | ChromaDB storage path |
 
+`ChatAgent` also accepts `max_history` (default `20`) to cap the number of
+retained conversation messages, and `RAGAgent` accepts `embedding_model`
+(default `text-embedding-3-small`) to pin the embedding model.
+
 Vector database persists in the `./chroma_db` directory.
+
+## Testing
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+Tests mock the OpenAI client and ChromaDB collection, so no API key or network
+access is required.
